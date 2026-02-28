@@ -1,4 +1,19 @@
 <?php
+/*********************************************************************
+main.inc.php
+
+Master include file which must be included at the start of every file.
+The brain of the whole sytem. Don't monkey with it.
+
+Peter Rotich <peter@osticket.com>
+Copyright (c)  2006-2013 osTicket
+http://www.osticket.com
+
+Released under the GNU General Public License WITHOUT ANY WARRANTY.
+See LICENSE.TXT for details.
+
+vim: expandtab sw=4 ts=4 sts=4:
+**********************************************************************/
 //Default Configuration
 $CONFIG = '{"lang":"en","error_reporting":false,"show_hidden":false,"hide_Cols":false,"theme":"light"}';
 
@@ -27,7 +42,6 @@ $use_auth = true;
 // Generate secure password hash - https://tinyfilemanager.github.io/docs/pwd.html
 $auth_users = array(
     'admin' => '$2a$12$WMJDGIw5uhdhgAt1RKLJxe0QboIF6P2yGHAdD791QQhyJi4UOqCOe', //admin@123
-    'user' => '$2a$12$862T1xVnJbKzXDImDBQxf.v8XLSv2FDaSf97JthXwMOz0pOjnezRm' //12345
 );
 
 // Readonly users
